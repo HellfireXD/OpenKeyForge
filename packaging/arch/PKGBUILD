@@ -1,0 +1,29 @@
+# Arch Linux package: repackages the release's .deb, the usual way Tauri
+# apps are packaged for the AUR (as openkeyforge-bin).
+#
+# CI (.github/workflows/build.yml) puts the freshly built .deb next to this
+# file as openkeyforge.deb, so makepkg uses it instead of downloading.
+# For the AUR, fill in sha256sums for the release .deb.
+
+pkgname=openkeyforge-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Configure macro pads, key decks and rotary encoders"
+arch=('x86_64')
+url="https://github.com/HellfireXD/OpenKeyForge"
+license=('GPL-3.0-or-later')
+depends=('webkit2gtk-4.1' 'gtk3' 'systemd-libs')
+provides=('openkeyforge')
+conflicts=('openkeyforge')
+install=openkeyforge.install
+# The binary ships stripped; skip makepkg's empty -debug split package.
+options=('!debug')
+source=("openkeyforge.deb::${url}/releases/download/v${pkgver}/OpenKeyForge_${pkgver}_amd64.deb")
+sha256sums=('SKIP')
+
+package() {
+    bsdtar -xf data.tar.* -C "${pkgdir}"
+    # The .deb's udev rule (/usr/lib/udev/rules.d/70-openkeyforge.rules) and
+    # desktop file come along; nothing else to move.
+    chmod 755 "${pkgdir}/usr/bin/openkeyforge"
+}

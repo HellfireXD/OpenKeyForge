@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The editor window. Device access, file dialogs and agent actions go through the app's own commands, so the page gets no plugin permissions beyond events and opening links.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:allow-open-url",
+    "dialog:allow-ask"
+  ]
+}

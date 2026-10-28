@@ -1,0 +1,42 @@
+[package]
+name = "openkeyforge"
+version.workspace = true
+description = "Configure macro pads, key decks and rotary encoders"
+license = "GPL-3.0-or-later"
+edition = "2021"
+
+[[bin]]
+name = "openkeyforge"
+path = "src/main.rs"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name, which
+# Windows needs, see https://github.com/rust-lang/cargo/issues/8519
+name = "openkeyforge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The driver layer: the keymap model and trait, and one crate per device family.
+okf_core = { package = "openkeyforge-core", path = "../crates/core" }
+okf_driver_ch57x = { package = "openkeyforge-driver-ch57x", path = "../crates/drivers/ch57x" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = ">=2.2.2, <3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+# Types the text and keystroke steps of agent actions.
+enigo = "0.6"
+
+# Trigger chords for agent actions. Windows and macOS register them as
+# global hotkeys, which also keeps them from reaching other apps. Linux has
+# no global hotkey API that works on Wayland, so there the agent reads the
+# chords straight from the device (src/hid.rs).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tauri-plugin-global-shortcut = "2"

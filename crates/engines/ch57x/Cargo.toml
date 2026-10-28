@@ -1,0 +1,53 @@
+[package]
+name = "ch57x"
+version.workspace = true
+edition = "2024"
+description = "CH57x macro keypad programmer engine (protocol, YAML config, hidapi transport, CLI)"
+license = "MIT"
+# The protocol code under src/keyboard, src/config.rs, src/parse.rs and the CLI is
+# vendored from kriomant/ch57x-keyboard-tool (MIT); see LICENSE-ch57x-keyboard-tool.
+
+[lib]
+name = "ch57x"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ch57x-keyboard-tool"
+path = "src/bin/ch57x-keyboard-tool/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:env_logger"]
+# The original tool's libusb transport, for keypads whose vendor interface
+# hidapi can't reach. Needs libusb (and on Windows a WinUSB/UsbDk driver).
+libusb = ["dep:rusb"]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+log = "0.4"
+itertools = "0.10"
+enumset = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_with = "2.2"
+serde_yaml = "0.9"
+nom = "7.1"
+strum = "0.24"
+strum_macros = "0.24"
+indoc = "1.0"
+env_logger = { version = "0.10", optional = true }
+rusb = { version = "0.9", optional = true }
+
+# hidapi talks to the keypad's vendor HID interface without detaching kernel
+# drivers or installing WinUSB, which is what makes one binary work on all
+# three platforms (the approach macropad-studio proved on real hardware).
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
+
+[target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Shared mode: reading the keypad for the live key test never seizes it.
+hidapi = { version = "2.6", default-features = false, features = ["macos-shared-device"] }

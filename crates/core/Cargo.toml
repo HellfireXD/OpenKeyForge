@@ -1,0 +1,27 @@
+[package]
+name = "openkeyforge-core"
+version.workspace = true
+edition = "2024"
+description = "OpenKeyForge's standard keymap model and device driver interface"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "okf_core"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+
+# Drivers find and talk to devices through hidapi: no kernel-driver detach on
+# Linux, no WinUSB driver swap on Windows, and it works with macOS's HID
+# driver. Re-exported as `okf_core::hidapi` so every driver shares one build.
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
+
+[target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Shared mode: reading a device for the live key test never seizes it.
+hidapi = { version = "2.6", default-features = false, features = ["macos-shared-device"] }

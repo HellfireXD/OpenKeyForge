@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenKeyForge",
+  "mainBinaryName": "openkeyforge",
+  "version": "../package.json",
+  "identifier": "io.github.hellfirexd.OpenKeyForge",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OpenKeyForge",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost",
+        "font-src": "'self'"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage", "dmg", "app", "nsis"],
+    "category": "Utility",
+    "shortDescription": "Configure macro pads, key decks and rotary encoders",
+    "longDescription": "A vendor-agnostic configurator for macro pads, key decks and rotary encoders. Map keys, knobs and layers in a visual editor, set lighting, test keys live, and flash the keymap to the device. Starts with the CH57x keypads (12 keys + 2 knobs and relatives); an agent adds actions the hardware cannot do: typing text, opening apps and URLs, shell commands and macros.",
+    "license": "GPL-3.0-or-later",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/udev/rules.d/70-openkeyforge.rules": "../packaging/linux/70-openkeyforge.rules"
+        },
+        "postInstallScript": "../packaging/linux/postinst.sh"
+      },
+      "rpm": {
+        "files": {
+          "/usr/lib/udev/rules.d/70-openkeyforge.rules": "../packaging/linux/70-openkeyforge.rules"
+        },
+        "postInstallScript": "../packaging/linux/postinst.sh"
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "both"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": null
+    }
+  }
+}

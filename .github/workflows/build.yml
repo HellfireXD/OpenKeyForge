@@ -1,0 +1,331 @@
+name: Build and Release
+
+# Run from the Actions tab. Builds every platform from the version in
+# package.json into a draft release, which you review and publish by hand.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One release build at a time per ref. The second dispatch waits instead of
+# cancelling the first, so a draft release never ends up half-filled.
+concurrency:
+  group: build-and-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Get Version
+        id: get_version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: This version has not already been released
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.get_version.outputs.version }}"
+          if answer=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft 2>&1); then
+            if [ "$(printf '%s' "$answer" | jq -r '.isDraft')" != "true" ]; then
+              echo "::error::$TAG is already published. Bump the version in package.json first."
+              exit 1
+            fi
+            echo "::notice::$TAG already has a draft release. This run writes into it."
+          elif printf '%s' "$answer" | grep -qi 'not found'; then
+            echo "$TAG has no release yet."
+          else
+            echo "::error::Could not establish whether $TAG is already released: $answer"
+            exit 1
+          fi
+
+      - name: Compose the download table
+        id: download_table
+        run: |
+          VERSION='${{ steps.get_version.outputs.version }}'
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          {
+            echo 'body<<RELEASE_BODY'
+            echo '## Download'
+            echo
+            echo '| System | Chip | Download | |'
+            echo '|---|---|---|---|'
+            echo "| **Windows** | Intel / AMD | [\`OpenKeyForge_${VERSION}_x64-setup.exe\`](${BASE}/OpenKeyForge_${VERSION}_x64-setup.exe) | installer |"
+            echo "| | Intel / AMD | [\`OpenKeyForge_${VERSION}_x64.exe\`](${BASE}/OpenKeyForge_${VERSION}_x64.exe) | portable |"
+            echo "| | ARM64 | [\`OpenKeyForge_${VERSION}_arm64-setup.exe\`](${BASE}/OpenKeyForge_${VERSION}_arm64-setup.exe) | installer |"
+            echo "| | ARM64 | [\`OpenKeyForge_${VERSION}_arm64.exe\`](${BASE}/OpenKeyForge_${VERSION}_arm64.exe) | portable |"
+            echo "| **macOS** | Intel **and** Apple Silicon | [\`OpenKeyForge_${VERSION}_universal.dmg\`](${BASE}/OpenKeyForge_${VERSION}_universal.dmg) | one file for both |"
+            echo "| **Linux** | x86-64 | [\`OpenKeyForge_${VERSION}_amd64.deb\`](${BASE}/OpenKeyForge_${VERSION}_amd64.deb) | Debian, Ubuntu |"
+            echo "| | x86-64 | [\`OpenKeyForge-${VERSION}-1.x86_64.rpm\`](${BASE}/OpenKeyForge-${VERSION}-1.x86_64.rpm) | Fedora, RHEL, openSUSE |"
+            echo "| | x86-64 | [\`openkeyforge-bin-${VERSION}-1-x86_64.pkg.tar.zst\`](${BASE}/openkeyforge-bin-${VERSION}-1-x86_64.pkg.tar.zst) | Arch (\`sudo pacman -U\`) |"
+            echo "| | x86-64 | [\`OpenKeyForge_${VERSION}_amd64.AppImage\`](${BASE}/OpenKeyForge_${VERSION}_amd64.AppImage) | portable |"
+            echo "| | x86-64 | [\`OpenKeyForge_${VERSION}_x86_64.flatpak\`](${BASE}/OpenKeyForge_${VERSION}_x86_64.flatpak) | \`flatpak install --user\` |"
+            echo
+            echo 'The command-line tool (`ch57x-keyboard-tool`, compatible with kriomant/ch57x-keyboard-tool configs) is attached for each platform too.'
+            echo
+            echo '> [!IMPORTANT]'
+            echo '> **Linux:** the .deb, .rpm and Arch packages install a udev rule so your user can reach the keypad. For the AppImage and Flatpak, install [`70-openkeyforge.rules`](https://github.com/'"${GITHUB_REPOSITORY}"'/blob/v'"${VERSION}"'/packaging/linux/70-openkeyforge.rules) yourself (see the README) and replug the keypad.'
+            echo
+            echo '> [!NOTE]'
+            echo '> Windows and macOS builds are not code-signed. Windows: SmartScreen → *More info* → *Run anyway*. macOS: right-click the app → *Open* the first time.'
+            echo
+            echo '---'
+            echo 'RELEASE_BODY'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          name: OpenKeyForge v${{ steps.get_version.outputs.version }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          body: ${{ steps.download_table.outputs.body }}
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            os: windows
+            arch: x64
+            target: ''
+            rust_target: ''
+          - platform: windows-latest
+            os: windows
+            arch: arm64
+            target: 'aarch64-pc-windows-msvc'
+            rust_target: 'aarch64-pc-windows-msvc'
+          - platform: ubuntu-24.04
+            os: linux
+            arch: amd64
+            target: ''
+            rust_target: ''
+          - platform: macos-latest
+            os: macos
+            arch: universal
+            target: 'universal-apple-darwin'
+            rust_target: 'aarch64-apple-darwin,x86_64-apple-darwin'
+
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.create-release.outputs.version }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libudev-dev \
+            patchelf \
+            rpm
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      # --- Windows ------------------------------------------------------------
+
+      - name: Build Windows
+        if: matrix.os == 'windows'
+        run: npm run tauri build ${{ matrix.target && format('-- --target {0}', matrix.target) || '' }}
+
+      - name: Build Windows CLI
+        if: matrix.os == 'windows'
+        run: cargo build --release --locked -p ch57x --bin ch57x-keyboard-tool ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+      - name: Upload Windows Artifacts
+        if: matrix.os == 'windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          OUT="target/${TARGET:+$TARGET/}release"
+          PORTABLE="OpenKeyForge_${VERSION}_${{ matrix.arch }}.exe"
+          CLI="ch57x-keyboard-tool_${VERSION}_windows_${{ matrix.arch }}.exe"
+          cp "$OUT/openkeyforge.exe" "$PORTABLE"
+          cp "$OUT/ch57x-keyboard-tool.exe" "$CLI"
+          gh release upload "v$VERSION" "$PORTABLE" "$CLI" "$OUT"/bundle/nsis/*-setup.exe --clobber
+
+      # --- Linux --------------------------------------------------------------
+
+      - name: Build Linux
+        if: matrix.os == 'linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: npm run tauri build
+
+      - name: Build Linux CLI
+        if: matrix.os == 'linux'
+        run: |
+          cargo build --release --locked -p ch57x --bin ch57x-keyboard-tool
+          cp target/release/ch57x-keyboard-tool "ch57x-keyboard-tool_${VERSION}_linux_amd64"
+
+      - name: Upload Linux Artifacts
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=target/release/bundle
+          gh release upload "v$VERSION" "$B"/deb/*.deb "$B"/rpm/*.rpm "$B"/appimage/*.AppImage "ch57x-keyboard-tool_${VERSION}_linux_amd64" --clobber
+
+      - name: Keep the .deb for the Arch and Flatpak packages
+        if: matrix.os == 'linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+      # --- macOS --------------------------------------------------------------
+
+      - name: Build macOS
+        if: matrix.os == 'macos'
+        run: npm run tauri build -- --target universal-apple-darwin
+
+      - name: Build macOS CLI (universal)
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p ch57x --bin ch57x-keyboard-tool --target "$t"
+          done
+          lipo -create -output "ch57x-keyboard-tool_${VERSION}_macos_universal" \
+            target/aarch64-apple-darwin/release/ch57x-keyboard-tool \
+            target/x86_64-apple-darwin/release/ch57x-keyboard-tool
+
+      - name: Upload macOS Artifacts
+        if: matrix.os == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "v$VERSION" target/universal-apple-darwin/release/bundle/dmg/*.dmg "ch57x-keyboard-tool_${VERSION}_macos_universal" --clobber
+
+  arch:
+    needs: [create-release, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: archlinux:base-devel
+    env:
+      VERSION: ${{ needs.create-release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: deb
+          path: deb
+
+      - name: Build the Arch package
+        run: |
+          set -euo pipefail
+          # makepkg refuses to run as root.
+          useradd -m builder
+          cp packaging/arch/* /home/builder/
+          cp deb/*.deb /home/builder/openkeyforge.deb
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" /home/builder/PKGBUILD
+          chown -R builder /home/builder
+          # -d: the runtime dependencies aren't needed to repackage the .deb.
+          su builder -c 'cd ~ && makepkg -d --noconfirm'
+          mkdir -p out
+          cp /home/builder/*.pkg.tar.zst out/
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: arch
+          path: out/*.pkg.tar.zst
+          if-no-files-found: error
+
+  flatpak:
+    needs: [create-release, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    env:
+      VERSION: ${{ needs.create-release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: deb
+          path: deb
+
+      - name: Put the .deb where the manifest expects it
+        run: cp deb/*.deb packaging/flatpak/openkeyforge.deb
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: OpenKeyForge_${{ env.VERSION }}_x86_64.flatpak
+          manifest-path: packaging/flatpak/io.github.hellfirexd.OpenKeyForge.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: flatpak
+          path: OpenKeyForge_${{ env.VERSION }}_x86_64.flatpak
+          if-no-files-found: error
+
+  # The Arch and Flatpak jobs run in containers without gh; attach their
+  # packages here.
+  publish-linux-extras:
+    needs: [create-release, arch, flatpak]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.create-release.outputs.version }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: extras
+          pattern: '{arch,flatpak}'
+          merge-multiple: true
+
+      - name: Upload to the draft release
+        run: gh release upload "v$VERSION" extras/* --clobber --repo "$GITHUB_REPOSITORY"

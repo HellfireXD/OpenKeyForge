@@ -1,0 +1,34 @@
+{
+	"name": "openkeyforge",
+	"version": "0.1.0",
+	"description": "A vendor-agnostic configurator for macro pads, key decks and rotary encoders.",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"test": "node --test --import tsx \"scripts/*.test.ts\"",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"tauri": "tauri"
+	},
+	"license": "GPL-3.0-or-later",
+	"dependencies": {
+		"@tauri-apps/api": "^2.12.4",
+		"@tauri-apps/plugin-dialog": "^2.8.3",
+		"@tauri-apps/plugin-opener": "^2.7.2"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-static": "^4.0.0",
+		"@sveltejs/kit": "^3.1.0",
+		"@sveltejs/vite-plugin-svelte": "^7.3.1",
+		"@tauri-apps/cli": "^2.12.4",
+		"@types/node": "^26.2.0",
+		"svelte": "^5.57.3",
+		"svelte-check": "^4.7.7",
+		"tsx": "^4.23.12",
+		"typescript": "^6.0.3",
+		"vite": "^8.3.5"
+	}
+}

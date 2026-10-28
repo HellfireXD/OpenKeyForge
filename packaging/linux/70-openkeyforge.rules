@@ -1,0 +1,24 @@
+# OpenKeyForge: let the logged-in user reach supported macro pads.
+#
+# Linux only lets root open raw HID devices. `uaccess` grants access to
+# whoever is logged in at the machine, rather than making the device
+# writable by every account. Installed by the .deb, .rpm and Arch packages;
+# for the AppImage and Flatpak, copy it to /etc/udev/rules.d/ and run
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# then replug the device.
+#
+# Every rule names a vendor and product. Never add a catch-all such as
+#   KERNEL=="hidraw*", TAG+="uaccess"
+# It would hand every program in the session raw access to every HID device:
+# keyboards (keylogging), security keys, controllers. Future drivers add
+# their devices here by ID (or, for Vial, by its serial-number marker).
+#
+# Rules must sort before 73-seat-late.rules for `uaccess` to apply.
+
+# --- CH57x macro keypads (driver: ch57x) ---
+# hidraw: uploads (vendor interface) and the live key test / agent chords
+# (keyboard, consumer and mouse interfaces). usb: the CLI's --libusb mode.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1189", ATTRS{idProduct}=="8840|8842|8850|8890", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="514c", ATTRS{idProduct}=="8850|8851", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1189", ATTRS{idProduct}=="8840|8842|8850|8890", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="514c", ATTRS{idProduct}=="8850|8851", TAG+="uaccess"

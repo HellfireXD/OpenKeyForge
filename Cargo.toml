@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+# Three layers: the app (src-tauri + src/), the driver layer (core's trait
+# and keymap model, plus one driver per device family), and the programmer
+# engines that speak each family's protocol.
+members = ["src-tauri", "crates/core", "crates/drivers/*", "crates/engines/*"]
+
+[workspace.package]
+version = "0.1.0"
+
+[profile.release]
+panic = "abort" # Strip expensive panic clean-up logic
+codegen-units = 1 # Compile crates one after another so the compiler can optimize better
+lto = true # Enables link to optimizations
+opt-level = "s" # Optimize for binary size
+strip = true # Remove debug symbols
