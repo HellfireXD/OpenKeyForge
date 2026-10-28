@@ -121,14 +121,13 @@ Download from [Releases](https://github.com/HellfireXD/OpenKeyForge/releases):
 | Fedora / RHEL / openSUSE | `sudo dnf install ./OpenKeyForge-…x86_64.rpm` |
 | Arch | `sudo pacman -U openkeyforge-bin-…pkg.tar.zst` |
 | Any Linux, portable | `OpenKeyForge_…_amd64.AppImage` |
-| Flatpak | `flatpak install --user OpenKeyForge_…_x86_64.flatpak` |
 
 ### Linux permissions
 
 Linux only lets root open raw HID devices. The **.deb, .rpm and Arch** packages install
 [`70-openkeyforge.rules`](packaging/linux/70-openkeyforge.rules), which grants access to the
 logged-in user for **supported devices only** (`uaccess`, matched by vendor and product ID).
-For the **AppImage and Flatpak**:
+For the **AppImage**:
 
 ```sh
 sudo curl -L -o /etc/udev/rules.d/70-openkeyforge.rules \
@@ -165,8 +164,7 @@ different actions, even when one pad still holds another profile's keymap.
 profiles; choosing one applies it. While it's on, closing the window keeps OpenKeyForge (and
 the agent) running. On Linux the tray needs a StatusNotifier host (KDE and most desktops;
 GNOME with the AppIndicator extension); the .deb, .rpm and Arch packages pull in
-libayatana-appindicator. The Flatpak doesn't include it yet (see the comment in its
-manifest), so its tray icon is unavailable.
+libayatana-appindicator, and the AppImage bundles it.
 
 ## The agent
 
@@ -179,7 +177,7 @@ OpenKeyForge is running.
 |---|---|---|
 | **Windows** | Global hotkey (swallowed) | Up to 32 agent slots (Ctrl+Alt+Shift+Win is reserved for the Office key). Shell actions run in PowerShell. |
 | **macOS** | Global hotkey (swallowed) | Up to 40 slots. Typing needs **Accessibility** permission. Shell actions run in `zsh -lc`. |
-| **Linux** | Read straight from the device | Works on X11 and Wayland, but needs the udev rule, and the chord also reaches the focused app (harmless). Under Wayland, typed text reaches X11/XWayland apps only. Shell actions run in `sh -lc`; in the Flatpak they run on the host through `flatpak-spawn`. |
+| **Linux** | Read straight from the device | Works on X11 and Wayland, but needs the udev rule, and the chord also reaches the focused app (harmless). Under Wayland, typed text reaches X11/XWayland apps only. Shell actions run in `sh -lc`. |
 
 **Security:** a keymap's shell and open actions run as you. Importing a keymap that contains
 any shows each one and asks first. Only use keymaps you wrote or trust.
@@ -190,7 +188,7 @@ any shows each one and asks first. Only use keymaps you wrote or trust.
   pass), the driver's key vocabulary encodes exactly like the engine's own parser for every
   key, and keymaps reproduce macropad-studio's packets.
 - Builds, type checks and tests run in Docker and in GitHub Actions on Linux, Windows and
-  macOS; the .deb, .rpm, Arch, AppImage and Flatpak packages build and install cleanly in
+  macOS; the .deb, .rpm, Arch and AppImage packages build and install cleanly in
   containers of their target distros.
 - **Not yet tested on real hardware.** CH57x uploads over hidapi follow macropad-studio, which
   was verified on `1189:8840` under macOS. `ch57x-2`/`ch57x-3` pads were only ever driven
@@ -220,12 +218,12 @@ docker exec okf-dev npm run tauri build              # .deb, .rpm, AppImage
 | `crates/core/` | Driver layer: keymap model, keys, agent lowering, `DeviceDriver` trait, registry, input decoding |
 | `crates/drivers/ch57x/` | Driver layer: CH57x translator and YAML import |
 | `crates/engines/ch57x/` | Engine: ch57x-keyboard-tool's protocol (vendored), hidapi transport, CLI |
-| `packaging/` | udev rule, Flatpak manifest, Arch PKGBUILD |
+| `packaging/` | udev rule, Arch PKGBUILD |
 | `.github/workflows/` | `test.yml` on every push/PR; `build.yml` (run by hand) builds a draft release |
 
 ### Releasing
 
-1. Bump `version` in `package.json` (and the `<release>` in the Flatpak metainfo).
+1. Bump `version` in `package.json`.
 2. Run **Build and Release** from the Actions tab.
 3. Review the draft release and publish it.
 

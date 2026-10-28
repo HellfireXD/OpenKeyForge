@@ -73,12 +73,11 @@ jobs:
             echo "| | x86-64 | [\`OpenKeyForge-${VERSION}-1.x86_64.rpm\`](${BASE}/OpenKeyForge-${VERSION}-1.x86_64.rpm) | Fedora, RHEL, openSUSE |"
             echo "| | x86-64 | [\`openkeyforge-bin-${VERSION}-1-x86_64.pkg.tar.zst\`](${BASE}/openkeyforge-bin-${VERSION}-1-x86_64.pkg.tar.zst) | Arch (\`sudo pacman -U\`) |"
             echo "| | x86-64 | [\`OpenKeyForge_${VERSION}_amd64.AppImage\`](${BASE}/OpenKeyForge_${VERSION}_amd64.AppImage) | portable |"
-            echo "| | x86-64 | [\`OpenKeyForge_${VERSION}_x86_64.flatpak\`](${BASE}/OpenKeyForge_${VERSION}_x86_64.flatpak) | \`flatpak install --user\` |"
             echo
             echo 'The command-line tool (`ch57x-keyboard-tool`, compatible with kriomant/ch57x-keyboard-tool configs) is attached for each platform too.'
             echo
             echo '> [!IMPORTANT]'
-            echo '> **Linux:** the .deb, .rpm and Arch packages install a udev rule so your user can reach the keypad. For the AppImage and Flatpak, install [`70-openkeyforge.rules`](https://github.com/'"${GITHUB_REPOSITORY}"'/blob/v'"${VERSION}"'/packaging/linux/70-openkeyforge.rules) yourself (see the README) and replug the keypad.'
+            echo '> **Linux:** the .deb, .rpm and Arch packages install a udev rule so your user can reach the keypad. For the AppImage, install [`70-openkeyforge.rules`](https://github.com/'"${GITHUB_REPOSITORY}"'/blob/v'"${VERSION}"'/packaging/linux/70-openkeyforge.rules) yourself (see the README) and replug the keypad.'
             echo
             echo '> [!NOTE]'
             echo '> Windows and macOS builds are not code-signed. Windows: SmartScreen → *More info* → *Run anyway*. macOS: right-click the app → *Open* the first time.'
@@ -211,7 +210,7 @@ jobs:
           B=target/release/bundle
           gh release upload "v$VERSION" "$B"/deb/*.deb "$B"/rpm/*.rpm "$B"/appimage/*.AppImage "ch57x-keyboard-tool_${VERSION}_linux_amd64" --clobber
 
-      - name: Keep the .deb for the Arch and Flatpak packages
+      - name: Keep the .deb for the Arch package
         if: matrix.os == 'linux'
         uses: actions/upload-artifact@v5
         with:
@@ -278,43 +277,9 @@ jobs:
           path: out/*.pkg.tar.zst
           if-no-files-found: error
 
-  flatpak:
-    needs: [create-release, build]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
-      options: --privileged
-    env:
-      VERSION: ${{ needs.create-release.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/download-artifact@v5
-        with:
-          name: deb
-          path: deb
-
-      - name: Put the .deb where the manifest expects it
-        run: cp deb/*.deb packaging/flatpak/openkeyforge.deb
-
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: OpenKeyForge_${{ env.VERSION }}_x86_64.flatpak
-          manifest-path: packaging/flatpak/io.github.hellfirexd.OpenKeyForge.yml
-          cache-key: flatpak-builder-${{ github.sha }}
-          upload-artifact: false
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: flatpak
-          path: OpenKeyForge_${{ env.VERSION }}_x86_64.flatpak
-          if-no-files-found: error
-
-  # The Arch and Flatpak jobs run in containers without gh; attach their
-  # packages here.
-  publish-linux-extras:
-    needs: [create-release, arch, flatpak]
+  # The Arch job runs in a container without gh; attach its package here.
+  publish-arch:
+    needs: [create-release, arch]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -323,9 +288,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v5
         with:
-          path: extras
-          pattern: '{arch,flatpak}'
-          merge-multiple: true
+          name: arch
+          path: arch
 
       - name: Upload to the draft release
-        run: gh release upload "v$VERSION" extras/* --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "v$VERSION" arch/*.pkg.tar.zst --clobber --repo "$GITHUB_REPOSITORY"

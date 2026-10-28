@@ -24,9 +24,7 @@ src-tauri/gen/
 # Local Docker build outputs (bundles, screenshots)
 /dist/
 
-# Packaging scratch: the .deb CI copies in, and flatpak-builder's cache
-packaging/flatpak/openkeyforge.deb
-.flatpak-builder/
+# Packaging scratch: the .deb CI copies in for the Arch package
 packaging/arch/*.deb
 packaging/arch/*.pkg.tar.zst
 

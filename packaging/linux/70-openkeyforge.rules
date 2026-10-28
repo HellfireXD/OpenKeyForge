@@ -3,7 +3,7 @@
 # Linux only lets root open raw HID devices. `uaccess` grants access to
 # whoever is logged in at the machine, rather than making the device
 # writable by every account. Installed by the .deb, .rpm and Arch packages;
-# for the AppImage and Flatpak, copy it to /etc/udev/rules.d/ and run
+# for the AppImage, copy it to /etc/udev/rules.d/ and run
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
 # then replug the device.
 #
