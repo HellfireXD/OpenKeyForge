@@ -51,12 +51,14 @@
         "files": {
           "/usr/lib/udev/rules.d/70-openkeyforge.rules": "../packaging/linux/70-openkeyforge.rules"
         },
+        "depends": ["libayatana-appindicator3-1"],
         "postInstallScript": "../packaging/linux/postinst.sh"
       },
       "rpm": {
         "files": {
           "/usr/lib/udev/rules.d/70-openkeyforge.rules": "../packaging/linux/70-openkeyforge.rules"
         },
+        "depends": ["libayatana-appindicator-gtk3"],
         "postInstallScript": "../packaging/linux/postinst.sh"
       }
     },

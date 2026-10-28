@@ -342,6 +342,7 @@ impl DeviceDriver for Ch57xDriver {
                 path: k.path,
                 vendor_id: k.vendor_id,
                 product_id: k.product_id,
+                serial: k.serial,
                 models: k.models.into_iter().map(model_id).collect(),
             })
             .collect()

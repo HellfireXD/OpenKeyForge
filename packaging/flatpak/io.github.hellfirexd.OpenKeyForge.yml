@@ -21,7 +21,16 @@ finish-args:
   - --device=all
   # Shell and Open actions run programs on the host through flatpak-spawn.
   - --talk-name=org.freedesktop.Flatpak
+  # The optional tray icon (StatusNotifierItem).
+  - --talk-name=org.kde.StatusNotifierWatcher
 modules:
+  # The tray icon needs libayatana-appindicator, which the GNOME runtime
+  # lacks. Flathub's shared module builds it; to enable the tray here, add
+  # https://github.com/flathub/shared-modules as a git submodule at
+  # packaging/flatpak/shared-modules and list
+  #   - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+  # above this module. Without it the app runs and reports that the tray
+  # icon can't be created.
   - name: openkeyforge
     buildsystem: simple
     sources:

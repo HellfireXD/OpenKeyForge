@@ -91,10 +91,11 @@ export interface Catalog {
 }
 
 export interface AppStateDto {
-	mapping: Mapping;
-	uploaded: Mapping | null;
+	profiles: Profiles;
+	/** What each config last wrote to its device (by config id), if the device still holds it. */
+	applied: Record<string, Mapping>;
 	warning: string | null;
-	errors: Record<string, string>;
+	settings: Settings;
 	catalog: Catalog;
 }
 
@@ -125,10 +126,60 @@ export interface AgentStatus {
 	problem: string | null;
 }
 
+/** Identifies one physical device (crates/core/src/profile.rs). */
+export interface DeviceRef {
+	vendor_id: number;
+	product_id: number;
+	serial?: string;
+	index: number;
+}
+
+/** An attached device, with how a config binds to it. */
+export interface Attached extends Device {
+	bind: DeviceRef;
+	key: string;
+}
+
+export interface DeviceConfig {
+	id: string;
+	name?: string;
+	bind: DeviceRef | null;
+	keymap: Mapping;
+}
+
+export interface Profile {
+	id: string;
+	name: string;
+	configs: DeviceConfig[];
+}
+
+export interface Profiles {
+	/** The profile last applied. */
+	active: string | null;
+	profiles: Profile[];
+}
+
+export interface Settings {
+	agent: boolean;
+	tray: boolean;
+}
+
+/** serde's encoding of Rust's Result. */
+export type Outcome<T> = { Ok: T } | { Err: string };
+
 export interface Status {
-	devices: Device[];
+	devices: Attached[];
+	/** profile id → config id → device key it would be written to, or why not. */
+	targets: Record<string, Record<string, Outcome<string>>>;
 	agent: AgentStatus;
 	watching: boolean;
+}
+
+export interface WriteResult {
+	config: string;
+	hardware: number;
+	software: number;
+	error: string | null;
 }
 
 export type KeypadEvent =
@@ -140,16 +191,26 @@ export type KeypadEvent =
 
 export const api = {
 	getState: () => invoke<AppStateDto>('get_state'),
-	saveMapping: (mapping: Mapping) => invoke<{ errors: Record<string, string> }>('save_mapping', { mapping }),
-	preview: (mapping: Mapping) =>
-		invoke<{ packets: string[]; hardware: number; software: number }>('preview', { mapping }),
-	upload: (mapping: Mapping, path: string | null = null) =>
-		invoke<{ hardware: number; software: number }>('upload', { mapping, path }),
+	checkKeymap: (keymap: Mapping) => invoke<Record<string, string>>('check_keymap', { keymap }),
+	saveConfig: (profile: string, config: string, keymap: Mapping) =>
+		invoke<Record<string, string>>('save_config', { profile, config, keymap }),
+	createProfile: (name: string, copyOf: string | null) => invoke<Profile>('create_profile', { name, copyOf }),
+	renameProfile: (profile: string, name: string) => invoke<void>('rename_profile', { profile, name }),
+	deleteProfile: (profile: string) => invoke<void>('delete_profile', { profile }),
+	addConfig: (profile: string, bind: DeviceRef | null, driver: string, model: string) =>
+		invoke<DeviceConfig>('add_config', { profile, bind, driver, model }),
+	updateConfig: (profile: string, config: string, name: string | null, bind: DeviceRef | null) =>
+		invoke<void>('update_config', { profile, config, name, bind }),
+	removeConfig: (profile: string, config: string) => invoke<void>('remove_config', { profile, config }),
+	preview: (keymap: Mapping) =>
+		invoke<{ packets: string[]; hardware: number; software: number }>('preview', { keymap }),
+	applyProfile: (profile: string) => invoke<WriteResult[]>('apply_profile', { profile }),
+	uploadConfig: (profile: string, config: string) => invoke<WriteResult>('upload_config', { profile, config }),
 	starterMapping: (driver: string, model: string) => invoke<Mapping>('starter_mapping', { driver, model }),
-	readFromDevice: (driver: string, model: string, path: string | null = null) =>
-		invoke<Mapping>('read_from_device', { driver, model, path }),
+	readFromDevice: (driver: string, path: string) => invoke<Mapping>('read_from_device', { driver, path }),
 	status: () => invoke<Status>('status'),
 	setAgent: (enabled: boolean) => invoke<AgentStatus>('set_agent', { enabled }),
+	setTray: (enabled: boolean) => invoke<void>('set_tray', { enabled }),
 	testAction: (action: Action) => invoke<void>('test_action', { action }),
 	listApps: () => invoke<string[]>('list_apps'),
 	importMapping: () => invoke<Mapping | null>('import_mapping'),
@@ -162,6 +223,17 @@ export function onKeypadEvent(fn: (e: KeypadEvent) => void): Promise<UnlistenFn>
 
 export function onAgentFired(fn: (f: Fired) => void): Promise<UnlistenFn> {
 	return listen<Fired>('agent-fired', (e) => fn(e.payload));
+}
+
+/** A profile (or one config) was written, from the window or the tray. */
+export function onApplied(
+	fn: (profile: string, results: WriteResult[], applied: Record<string, Mapping>) => void,
+): Promise<UnlistenFn> {
+	return listen<[string, WriteResult[], Record<string, Mapping>]>('applied', (e) => fn(...e.payload));
+}
+
+export function onProfilesChanged(fn: (p: Profiles) => void): Promise<UnlistenFn> {
+	return listen<Profiles>('profiles-changed', (e) => fn(e.payload));
 }
 
 export function onAgentError(fn: (message: string) => void): Promise<UnlistenFn> {

@@ -1,6 +1,18 @@
 // The editor's state: the mapping being edited, what's on the keypad, the
 // selection, and what the backend reports about devices and the agent.
-import { api, message, type Action, type AgentStatus, type Catalog, type Device, type KeypadEvent, type Mapping } from '../api.js';
+import {
+	api,
+	message,
+	type Action,
+	type AgentStatus,
+	type Attached,
+	type Catalog,
+	type KeypadEvent,
+	type Mapping,
+	type Profiles,
+	type Settings,
+	type Status,
+} from '../api.js';
 import { t } from '../i18n.js';
 import {
 	accordId,
@@ -25,8 +37,34 @@ export interface Hit {
 }
 
 class Studio {
-	mapping = $state<Mapping | null>(null);
-	uploaded = $state<Mapping | null>(null);
+	/** Every profile; the editor works on one device config of one profile. */
+	profiles = $state<Profiles>({ active: null, profiles: [] });
+	/** What each config last wrote to its device, by config id. */
+	applied = $state<Record<string, Mapping>>({});
+	settings = $state<Settings>({ agent: false, tray: false });
+	profileId = $state('');
+	configId = $state('');
+	profile = $derived(this.profiles.profiles.find((p) => p.id === this.profileId));
+	config = $derived(this.profile?.configs.find((c) => c.id === this.configId));
+
+	/** The keymap being edited: the selected config's. */
+	get mapping(): Mapping | null {
+		return this.config?.keymap ?? null;
+	}
+	set mapping(m: Mapping | null) {
+		if (this.config && m) this.config.keymap = m;
+	}
+
+	/** What the selected config's device holds, if it was written from this config. */
+	get uploaded(): Mapping | null {
+		return this.config ? (this.applied[this.config.id] ?? null) : null;
+	}
+	set uploaded(m: Mapping | null) {
+		if (!this.config) return;
+		if (m) this.applied[this.config.id] = m;
+		else delete this.applied[this.config.id];
+	}
+
 	errors = $state<Record<string, string>>({});
 	catalog = $state<Catalog | null>(null);
 	warning = $state<string | null>(null);
@@ -37,9 +75,15 @@ class Studio {
 	picking = $state(false);
 	uploading = $state(false);
 
-	devices = $state<Device[] | null>(null);
-	/** The first connected device the current driver can program. */
-	device = $derived(this.devices?.find((d) => d.driver === this.mapping?.driver));
+	devices = $state<Attached[] | null>(null);
+	/** profile id → config id → device key, or why the config has no device. */
+	targets = $state<Status['targets']>({});
+	/** Where the selected config would be written right now. */
+	target = $derived(this.targets[this.profileId]?.[this.configId]);
+	/** The attached device the selected config would be written to. */
+	device = $derived(
+		this.target && 'Ok' in this.target ? this.devices?.find((d) => 'Ok' in this.target! && d.key === this.target.Ok) : undefined,
+	);
 	agent = $state<AgentStatus | null>(null);
 	watching = $state(false);
 	hit = $state<Hit | null>(null);
@@ -66,13 +110,51 @@ class Studio {
 		const st = await api.getState();
 		// Keycap text depends on the platform; set it before anything renders.
 		setPlatform(st.catalog.platform);
-		for (const l of st.mapping.layers) l.slots ??= {};
+		for (const p of st.profiles.profiles) for (const c of p.configs) for (const l of c.keymap.layers) l.slots ??= {};
 		this.catalog = st.catalog;
-		this.mapping = st.mapping;
-		this.uploaded = st.uploaded;
-		this.errors = st.errors;
+		this.settings = st.settings;
+		this.applied = st.applied;
+		this.profiles = st.profiles;
 		this.warning = st.warning;
-		this.#lastSaved = JSON.stringify(st.mapping);
+		const first = st.profiles.profiles.find((p) => p.id === st.profiles.active) ?? st.profiles.profiles[0];
+		await this.open(first.id, first.configs[0].id);
+	}
+
+	/** Switches the editor to another profile and device config. */
+	async open(profileId: string, configId?: string): Promise<void> {
+		await this.save();
+		const profile = this.profiles.profiles.find((p) => p.id === profileId);
+		if (!profile) return;
+		this.profileId = profile.id;
+		this.configId = profile.configs.find((c) => c.id === configId)?.id ?? profile.configs[0].id;
+		this.layer = 0;
+		this.select('b0');
+		this.#lastSaved = JSON.stringify(this.mapping);
+		await this.refreshErrors();
+	}
+
+	async refreshErrors(): Promise<void> {
+		if (!this.mapping) return;
+		try {
+			this.errors = await api.checkKeymap($state.snapshot(this.mapping) as Mapping);
+		} catch (e) {
+			this.errors = {};
+			toast(t('save.fail'), message(e), 'err');
+		}
+	}
+
+	/** Takes the backend's copy after a profile change made elsewhere (tray, other edits). */
+	takeProfiles(p: Profiles): void {
+		// Keep the keymap being edited: the backend copy may predate the latest keystroke.
+		const editing = this.config ? $state.snapshot(this.config.keymap) : null;
+		this.profiles = p;
+		if (editing && this.config) this.config.keymap = editing as Mapping;
+		if (!this.profile) {
+			const first = p.profiles[0];
+			if (first) void this.open(first.id);
+		} else if (!this.config) {
+			this.configId = this.profile.configs[0].id;
+		}
 	}
 
 	select(name: string): void {
@@ -99,10 +181,10 @@ class Studio {
 	async save(json = JSON.stringify(this.mapping)): Promise<void> {
 		clearTimeout(this.#saveTimer);
 		if (!this.mapping || json === this.#lastSaved) return;
+		const [profile, config] = [this.profileId, this.configId];
 		try {
-			const r = await api.saveMapping(JSON.parse(json));
+			this.errors = await api.saveConfig(profile, config, JSON.parse(json));
 			this.#lastSaved = json;
-			this.errors = r.errors;
 		} catch (e) {
 			toast(t('save.fail'), message(e), 'err');
 		}
@@ -113,6 +195,7 @@ class Studio {
 			const r = await api.status();
 			const seen = this.agent?.last?.at ?? null;
 			this.devices = r.devices;
+			this.targets = r.targets;
 			this.agent = r.agent;
 			this.watching = r.watching;
 			// Fallback for missed events: show an agent action newer than the last poll.

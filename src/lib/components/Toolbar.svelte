@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { ask } from '@tauri-apps/plugin-dialog';
 	import { openUrl } from '@tauri-apps/plugin-opener';
-	import { api, message, usbId } from '../api.js';
+	import { api, message, usbId, type Mapping } from '../api.js';
 	import { LANG, setLang, t } from '../i18n.js';
 	import { stopRecording } from '../recorder.js';
 	import { studio } from '../stores/studio.svelte.js';
@@ -45,8 +45,8 @@
 		await studio.save();
 		studio.uploading = true;
 		try {
-			const snapshot = $state.snapshot(studio.mapping);
-			const r = await api.upload(snapshot);
+			const snapshot = $state.snapshot(studio.mapping) as Mapping;
+			const r = await api.uploadConfig(studio.profileId, studio.configId);
 			studio.uploaded = structuredClone(snapshot);
 			toast(t('up.ok'), t('up.okSub', { hw: r.hardware, sw: r.software }), 'ok');
 			if (r.software && !studio.agent?.enabled) toast(t('up.agentOff'), t('up.agentOffSub'));
@@ -109,8 +109,12 @@
 	async function readDevice() {
 		menuOpen = false;
 		if (!studio.mapping) return;
+		if (!studio.device) {
+			toast(t('read.fail'), t('dev.off'), 'err');
+			return;
+		}
 		try {
-			const m = await api.readFromDevice(studio.mapping.driver, studio.mapping.model, studio.device?.path ?? null);
+			const m = await api.readFromDevice(studio.mapping.driver, studio.device.path);
 			studio.mapping = m;
 			studio.uploaded = structuredClone(m);
 			studio.layer = 0;
@@ -118,6 +122,18 @@
 			toast(t('read.ok'), '', 'ok');
 		} catch (e) {
 			toast(t('read.fail'), message(e), 'err');
+		}
+	}
+
+	async function toggleTray() {
+		menuOpen = false;
+		const on = !studio.settings.tray;
+		try {
+			await api.setTray(on);
+			studio.settings.tray = on;
+			toast(on ? t('tray.on') : t('tray.off'), on ? t('tray.onSub') : '', 'ok');
+		} catch (e) {
+			toast(t('tray.fail'), message(e), 'err');
 		}
 	}
 
@@ -172,6 +188,10 @@
 			{#if studio.caps?.read_keymap}
 				<button onclick={readDevice}>{t('menu.read')}</button>
 			{/if}
+			<hr />
+			<button role="menuitemcheckbox" aria-checked={studio.settings.tray} onclick={toggleTray}
+				>{studio.settings.tray ? '✓ ' : ''}{t('menu.tray')}</button
+			>
 			<hr />
 			<button onclick={exportMapping}>{t('menu.export')}</button>
 			<button onclick={importMapping}>{t('menu.import')}</button>

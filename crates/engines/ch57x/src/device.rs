@@ -26,6 +26,8 @@ pub struct Keypad {
     pub vendor_id: u16,
     pub product_id: u16,
     pub product: String,
+    /// USB serial number, if the device reports one (CH57x pads usually don't).
+    pub serial: Option<String>,
     /// Models that use this USB id. More than one means the user must pick.
     pub models: Vec<KeyboardModel>,
 }
@@ -50,6 +52,7 @@ pub fn list(api: &HidApi) -> Vec<Keypad> {
             vendor_id: d.vendor_id(),
             product_id: d.product_id(),
             product: d.product_string().unwrap_or("").trim().to_string(),
+            serial: d.serial_number().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
             models: KeyboardModel::from_vid_pid(d.vendor_id(), d.product_id())
                 .into_iter()
                 .map(|i| i.model)

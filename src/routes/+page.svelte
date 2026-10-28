@@ -1,10 +1,11 @@
 <script lang="ts">
 	import '../app.css';
 	import { onMount } from 'svelte';
-	import { api, message, onAgentError, onAgentFired, onKeypadEvent } from '../lib/api.js';
+	import { api, message, onAgentError, onAgentFired, onApplied, onKeypadEvent, onProfilesChanged } from '../lib/api.js';
 	import Device from '../lib/components/Device.svelte';
 	import Inspector from '../lib/components/Inspector.svelte';
 	import KeypadPanel from '../lib/components/KeypadPanel.svelte';
+	import ProfileBar from '../lib/components/ProfileBar.svelte';
 	import LayerPanel from '../lib/components/LayerPanel.svelte';
 	import Toasts from '../lib/components/Toasts.svelte';
 	import Toolbar from '../lib/components/Toolbar.svelte';
@@ -65,6 +66,11 @@
 			onKeypadEvent((e) => studio.rawHit(e)),
 			onAgentFired((f) => studio.showHit(f.layer, f.slot)),
 			onAgentError((m) => toast(t('agent.actionFail'), m, 'err')),
+			// The tray (or another write) changed what devices hold or which profile is active.
+			onApplied((_profile, _results, applied) => {
+				studio.applied = applied;
+			}),
+			onProfilesChanged((p) => studio.takeProfiles(p)),
 		];
 		let timer: ReturnType<typeof setInterval> | undefined;
 		studio
@@ -91,6 +97,7 @@
 			{#if studio.devices && !studio.devices.length && studio.catalog.platform === 'linux'}
 				<div class="banner on">{t('dev.linuxHint')}</div>
 			{/if}
+			<ProfileBar />
 			<Device />
 			<div class="forms">
 				<LayerPanel />

@@ -7,6 +7,8 @@
 //! chord and performs the real action, so drivers never see software actions.
 //! F21–F24 are left out because macOS has no keycodes for them.
 
+use std::collections::HashSet;
+
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -147,6 +149,18 @@ pub fn check_software(kind: &ActionKind) -> Result<()> {
 /// hardware-only mapping a driver can write, and the triggers the agent
 /// listens for.
 pub fn lower(m: &Mapping) -> Result<(Mapping, Vec<Trigger>)> {
+    lower_avoiding(m, &HashSet::new())
+}
+
+/// Like [`lower`], but never assigns a chord in `taken`: chords live on
+/// other attached devices, so two devices never send the same chord for
+/// different actions.
+pub fn lower_avoiding(m: &Mapping, taken: &HashSet<(u8, u8)>) -> Result<(Mapping, Vec<Trigger>)> {
+    let mut free = (0..max_software_slots())
+        .map(trigger)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|a| !taken.contains(&(a.mods, a.code.unwrap_or(0))));
     let mut out = m.clone();
     let mut triggers = Vec::new();
     for (li, layer) in out.layers.iter_mut().enumerate() {
@@ -158,7 +172,12 @@ pub fn lower(m: &Mapping) -> Result<(Mapping, Vec<Trigger>)> {
                 continue;
             }
             check_software(&action.kind)?;
-            let chord = trigger(triggers.len())?;
+            let chord = free.next().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "out of agent chords: all {} are used across your attached devices",
+                    max_software_slots()
+                )
+            })?;
             triggers.push(Trigger {
                 mods: chord.mods,
                 code: chord.code.expect("trigger chords have a key"),
@@ -188,6 +207,23 @@ mod tests {
         assert_eq!(all.len(), max_software_slots());
         assert!(trigger(max_software_slots()).is_err());
         assert!(all.iter().all(|&(m, c)| is_trigger_chord(m, c)));
+    }
+
+    #[test]
+    fn lowering_skips_chords_taken_by_other_devices() {
+        let m: Mapping = serde_json::from_str(
+            r#"{"rows": 1, "columns": 1, "knobs": 0, "layers": [{"slots": {
+                "b0": {"type": "text", "text": "hi"}}}]}"#,
+        )
+        .unwrap();
+        let first = trigger(0).unwrap();
+        let taken = HashSet::from([(first.mods, first.code.unwrap())]);
+        let (_, triggers) = lower_avoiding(&m, &taken).unwrap();
+        let second = trigger(1).unwrap();
+        assert_eq!(
+            (triggers[0].mods, triggers[0].code),
+            (second.mods, second.code.unwrap())
+        );
     }
 
     #[test]

@@ -101,6 +101,7 @@ UI or the other drivers.
   slots, set each layer's lighting.
 - **Key recorder**: press a shortcut and it's captured.
 - **Live key test**: press a key on the device and the editor highlights the slot it fired.
+- **Profiles** spanning several devices, switchable from the app or an optional **tray icon**.
 - **Agent actions** for what hardware can't store: type any Unicode text, open apps, URLs and
   files, run shell commands, and macros with waits and repeats. Works with every driver.
 - **Import** ch57x-keyboard-tool YAML configs and macropad-studio mappings; export keymaps as
@@ -143,6 +144,29 @@ included.
 
 No drivers needed: devices are reached through the system HID stack, and once programmed they
 work as ordinary keyboards on any computer, with or without OpenKeyForge.
+
+## Profiles and the tray
+
+A **profile** ("Halo", "Adobe") holds one keymap per device. **Apply profile** writes each of
+its keymaps to the matching attached device; devices the profile doesn't include keep what
+they have. With two pads, "Halo" can hold a keymap for each, and switching to "Adobe" rewrites
+whichever pads "Adobe" has keymaps for.
+
+Each keymap in a profile is bound to a device by driver, model and USB ID, then by serial
+number if the device has one. CH57x pads report no serial number, so identical pads are told
+apart by their order among attached pads; if two identical pads swap after you move them to
+other ports, rebind them in the profile bar. A keymap can also be left unbound ("any matching
+device").
+
+Agent chords are allocated across devices, so two pads never send the same chord for
+different actions, even when one pad still holds another profile's keymap.
+
+**System tray** (optional, ⋯ menu → *Keep running in system tray*): a tray icon lists your
+profiles; choosing one applies it. While it's on, closing the window keeps OpenKeyForge (and
+the agent) running. On Linux the tray needs a StatusNotifier host (KDE and most desktops;
+GNOME with the AppIndicator extension); the .deb, .rpm and Arch packages pull in
+libayatana-appindicator. The Flatpak doesn't include it yet (see the comment in its
+manifest), so its tray icon is unavailable.
 
 ## The agent
 

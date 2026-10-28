@@ -1,20 +1,28 @@
 //! The app layer: Tauri commands for the editor. Everything device-specific
 //! goes through the driver [`Registry`]; this file never names a device family
 //! except to register its driver in [`registry`].
+//!
+//! The user edits profiles. Each profile holds one keymap per device
+//! ("config"); writing a config records what that device now holds in the
+//! live map, keyed by device. The agent listens for the chords of every live
+//! device, and new chords are always picked outside those already live, so
+//! two devices never send the same chord for different actions.
 
 mod agent;
 mod hid;
 mod store;
+mod tray;
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use okf_core::agent::{check_software, max_software_slots};
-use okf_core::driver::{prepare, slot_errors, DetectedDevice, DeviceDriver, ModelInfo};
+use okf_core::agent::{check_software, max_software_slots, Trigger};
+use okf_core::driver::{prepare_avoiding, slot_errors, DetectedDevice, DeviceDriver, ModelInfo};
 #[cfg(target_os = "linux")]
 use okf_core::input::KeypadEvent;
 use okf_core::model::{Action, ActionKind, MacroStep};
+use okf_core::profile::{identify, resolve, DeviceConfig, DeviceRef, Profile, Profiles};
 use okf_core::{keys, Mapping, Registry};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -22,7 +30,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use agent::{Agent, AgentStatus};
 use hid::Hid;
-use store::Store;
+use store::{Live, LiveMap, Settings, Store};
 
 /// Every device family OpenKeyForge can program. A new driver is one line here.
 fn registry() -> Registry {
@@ -38,16 +46,54 @@ struct AppState {
     hid: Hid,
     agent: Arc<Agent>,
     store: Store,
+    profiles: Mutex<Profiles>,
+    live: Mutex<LiveMap>,
+    settings: Mutex<Settings>,
+    /// One device write at a time (tray and window can both start one).
+    writing: Mutex<()>,
+    warning: Option<String>,
 }
 
 impl AppState {
     fn driver(&self, m: &Mapping) -> Result<Arc<dyn DeviceDriver>, String> {
         self.registry.get(&m.driver).map_err(err)
     }
+
+    fn save_profiles(&self, p: &Profiles) -> Result<(), String> {
+        self.store.save_profiles(p).map_err(err)
+    }
+
+    fn profile(&self, id: &str) -> Result<Profile, String> {
+        let profiles = self.profiles.lock().unwrap();
+        profiles
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(|| format!("no profile {id:?}"))
+    }
+
+    /// Every agent chord a live device sends.
+    fn live_triggers(&self) -> Vec<Trigger> {
+        self.live
+            .lock()
+            .unwrap()
+            .values()
+            .flat_map(|l| l.triggers.clone())
+            .collect()
+    }
 }
 
 fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
+}
+
+fn new_id(prefix: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}{nanos:x}")
 }
 
 #[derive(Serialize)]
@@ -119,32 +165,39 @@ fn errors_for(driver: &dyn DeviceDriver, m: &Mapping) -> Result<BTreeMap<String,
 
 #[derive(Serialize)]
 struct StateDto {
-    mapping: Mapping,
-    uploaded: Option<Mapping>,
+    profiles: Profiles,
+    /// What each config last wrote to its device, by config id, if that
+    /// device still holds it.
+    applied: BTreeMap<String, Mapping>,
     warning: Option<String>,
-    errors: BTreeMap<String, String>,
+    settings: Settings,
     catalog: Catalog,
 }
 
+fn applied(live: &LiveMap) -> BTreeMap<String, Mapping> {
+    live.values()
+        .map(|l| (l.config.clone(), l.keymap.clone()))
+        .collect()
+}
+
 #[tauri::command]
-fn get_state(state: State<'_, AppState>) -> Result<StateDto, String> {
-    let registry = &state.registry;
-    let starter = || {
-        registry
-            .get(DEFAULT_DRIVER)
-            .and_then(|d| d.starter(DEFAULT_MODEL))
-            .expect("the default driver has a starter keymap")
-    };
-    let check = |m: &Mapping| registry.get(&m.driver)?.check_layout(m);
-    let (mapping, warning) = state.store.draft(starter, check);
-    let errors = errors_for(state.driver(&mapping)?.as_ref(), &mapping)?;
-    Ok(StateDto {
-        mapping,
-        uploaded: state.store.uploaded(),
-        warning,
-        errors,
-        catalog: catalog(registry),
-    })
+fn get_state(state: State<'_, AppState>) -> StateDto {
+    StateDto {
+        profiles: state.profiles.lock().unwrap().clone(),
+        applied: applied(&state.live.lock().unwrap()),
+        warning: state.warning.clone(),
+        settings: state.settings.lock().unwrap().clone(),
+        catalog: catalog(&state.registry),
+    }
+}
+
+/// Slot errors for a keymap, for the editor's red marks.
+#[tauri::command]
+fn check_keymap(
+    state: State<'_, AppState>,
+    keymap: Mapping,
+) -> Result<BTreeMap<String, String>, String> {
+    errors_for(state.driver(&keymap)?.as_ref(), &keymap)
 }
 
 /// A new keymap for a driver and model, for when the user switches device type.
@@ -161,16 +214,207 @@ fn starter_mapping(
         .map_err(err)
 }
 
-#[derive(Serialize)]
-struct ErrorsDto {
-    errors: BTreeMap<String, String>,
+fn edit_profiles<T>(
+    state: &AppState,
+    app: &AppHandle,
+    f: impl FnOnce(&mut Profiles) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut profiles = state.profiles.lock().unwrap();
+    let out = f(&mut profiles)?;
+    state.save_profiles(&profiles)?;
+    let snapshot = profiles.clone();
+    drop(profiles);
+    let _ = tray::sync(app, state.settings.lock().unwrap().tray, &snapshot);
+    let _ = app.emit("profiles-changed", &snapshot);
+    Ok(out)
+}
+
+fn find_config<'a>(
+    profiles: &'a mut Profiles,
+    profile: &str,
+    config: &str,
+) -> Result<&'a mut DeviceConfig, String> {
+    profiles
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile)
+        .and_then(|p| p.configs.iter_mut().find(|c| c.id == config))
+        .ok_or_else(|| "that device config no longer exists".to_string())
+}
+
+/// Saves the keymap being edited and returns its slot errors.
+#[tauri::command]
+fn save_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    config: String,
+    keymap: Mapping,
+) -> Result<BTreeMap<String, String>, String> {
+    let errors = errors_for(state.driver(&keymap)?.as_ref(), &keymap)?;
+    // Saving happens on every edit, so skip the tray/menu refresh.
+    let mut profiles = state.profiles.lock().unwrap();
+    find_config(&mut profiles, &profile, &config)?.keymap = keymap;
+    state.save_profiles(&profiles)?;
+    let _ = app;
+    Ok(errors)
 }
 
 #[tauri::command]
-fn save_mapping(state: State<'_, AppState>, mapping: Mapping) -> Result<ErrorsDto, String> {
-    let errors = errors_for(state.driver(&mapping)?.as_ref(), &mapping)?;
-    state.store.save_draft(&mapping).map_err(err)?;
-    Ok(ErrorsDto { errors })
+fn create_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    copy_of: Option<String>,
+) -> Result<Profile, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("give the profile a name".into());
+    }
+    let starter = || {
+        state
+            .registry
+            .get(DEFAULT_DRIVER)
+            .and_then(|d| d.starter(DEFAULT_MODEL))
+            .map_err(err)
+    };
+    edit_profiles(&state, &app, |profiles| {
+        let configs =
+            match copy_of.and_then(|id| profiles.profiles.iter().find(|p| p.id == id).cloned()) {
+                Some(src) => src
+                    .configs
+                    .into_iter()
+                    .map(|c| DeviceConfig {
+                        id: new_id("c"),
+                        ..c
+                    })
+                    .collect(),
+                None => vec![DeviceConfig {
+                    id: new_id("c"),
+                    name: None,
+                    bind: None,
+                    keymap: starter()?,
+                }],
+            };
+        let profile = Profile {
+            id: new_id("p"),
+            name,
+            configs,
+        };
+        profiles.profiles.push(profile.clone());
+        Ok(profile)
+    })
+}
+
+#[tauri::command]
+fn rename_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    name: String,
+) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("give the profile a name".into());
+    }
+    edit_profiles(&state, &app, |profiles| {
+        let p = profiles
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile)
+            .ok_or("no such profile")?;
+        p.name = name;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn delete_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+) -> Result<(), String> {
+    edit_profiles(&state, &app, |profiles| {
+        if profiles.profiles.len() <= 1 {
+            return Err("keep at least one profile".into());
+        }
+        profiles.profiles.retain(|p| p.id != profile);
+        if profiles.active.as_deref() == Some(profile.as_str()) {
+            profiles.active = None;
+        }
+        Ok(())
+    })
+}
+
+/// Adds a device config to a profile: bound to an attached device (`bind`),
+/// or to whichever matching device is attached (`None`).
+#[tauri::command]
+fn add_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    bind: Option<DeviceRef>,
+    driver: String,
+    model: String,
+) -> Result<DeviceConfig, String> {
+    let keymap = state
+        .registry
+        .get(&driver)
+        .and_then(|d| d.starter(&model))
+        .map_err(err)?;
+    edit_profiles(&state, &app, |profiles| {
+        let p = profiles
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile)
+            .ok_or("no such profile")?;
+        let config = DeviceConfig {
+            id: new_id("c"),
+            name: None,
+            bind,
+            keymap,
+        };
+        p.configs.push(config.clone());
+        Ok(config)
+    })
+}
+
+#[tauri::command]
+fn update_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    config: String,
+    name: Option<String>,
+    bind: Option<DeviceRef>,
+) -> Result<(), String> {
+    edit_profiles(&state, &app, |profiles| {
+        let c = find_config(profiles, &profile, &config)?;
+        c.name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        c.bind = bind;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn remove_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    config: String,
+) -> Result<(), String> {
+    edit_profiles(&state, &app, |profiles| {
+        let p = profiles
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile)
+            .ok_or("no such profile")?;
+        if p.configs.len() <= 1 {
+            return Err("a profile needs at least one device".into());
+        }
+        p.configs.retain(|c| c.id != config);
+        Ok(())
+    })
 }
 
 #[derive(Serialize)]
@@ -181,8 +425,9 @@ struct PreviewDto {
 }
 
 #[tauri::command]
-fn preview(state: State<'_, AppState>, mapping: Mapping) -> Result<PreviewDto, String> {
-    let p = prepare(state.driver(&mapping)?.as_ref(), &mapping).map_err(err)?;
+fn preview(state: State<'_, AppState>, keymap: Mapping) -> Result<PreviewDto, String> {
+    let driver = state.driver(&keymap)?;
+    let p = prepare_avoiding(driver.as_ref(), &keymap, &HashSet::new()).map_err(err)?;
     Ok(PreviewDto {
         packets: p.encoded.preview,
         hardware: p.hardware,
@@ -190,72 +435,153 @@ fn preview(state: State<'_, AppState>, mapping: Mapping) -> Result<PreviewDto, S
     })
 }
 
-#[derive(Serialize)]
-struct UploadDto {
+#[derive(Debug, Clone, Serialize)]
+struct WriteResult {
+    config: String,
+    /// Slots stored on the device, and slots run by the agent.
     hardware: usize,
     software: usize,
+    /// Why the config wasn't written (device missing, invalid keymap, …).
+    error: Option<String>,
 }
 
-/// The single device of this keymap's driver to write to, or why not.
-fn pick(
-    driver: &dyn DeviceDriver,
-    api: &okf_core::hidapi::HidApi,
-    m: &Mapping,
-    path: Option<&str>,
-) -> anyhow::Result<DetectedDevice> {
-    let found = driver.detect(api);
-    let device = match path {
-        Some(path) => found.into_iter().find(|d| d.path == path),
-        None if found.len() > 1 => {
-            anyhow::bail!("several {} are connected; choose one", driver.name())
-        }
-        None => found.into_iter().next(),
-    };
-    let Some(device) = device else {
-        anyhow::bail!(
-            "no {} found{}",
-            driver.name(),
-            if cfg!(target_os = "linux") {
-                "; on Linux, install the udev rule and replug the device"
-            } else {
-                ""
-            }
-        );
-    };
-    anyhow::ensure!(
-        device.models.contains(&m.model.as_str()),
-        "this device ({}) speaks {}, but the keymap is for {}; change the model under Device",
-        device.usb_id(),
-        device.models.join(" or "),
-        m.model
+/// Writes one config to its resolved device and records it as live there.
+fn write_config(
+    state: &AppState,
+    app: &AppHandle,
+    profile: &Profile,
+    config: &DeviceConfig,
+    key: String,
+    device: DetectedDevice,
+) -> Result<(usize, usize), String> {
+    let driver = state.driver(&config.keymap)?;
+    if !errors_for(driver.as_ref(), &config.keymap)?.is_empty() {
+        return Err("fix the slots marked in red first".into());
+    }
+    let taken: HashSet<(u8, u8)> = state
+        .live
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| **k != key)
+        .flat_map(|(_, l)| l.triggers.iter().map(|t| (t.mods, t.code)))
+        .collect();
+    let prepared = prepare_avoiding(driver.as_ref(), &config.keymap, &taken).map_err(err)?;
+    let encoded = prepared.encoded.clone();
+    state
+        .hid
+        .call(move |api| driver.write(api, &device, &encoded))?;
+
+    let software = prepared.triggers.len();
+    let mut live = state.live.lock().unwrap();
+    live.insert(
+        key,
+        Live {
+            keymap: config.keymap.clone(),
+            triggers: prepared.triggers,
+            profile: profile.id.clone(),
+            config: config.id.clone(),
+        },
     );
-    Ok(device)
+    state.store.save_live(&live).map_err(err)?;
+    drop(live);
+    state.agent.set_triggers(app, state.live_triggers());
+    Ok((prepared.hardware, software))
 }
 
+/// Writes `configs` of `profile` (all when `None`) to their attached devices.
+fn apply(
+    state: &AppState,
+    app: &AppHandle,
+    profile_id: &str,
+    only: Option<&str>,
+) -> Result<Vec<WriteResult>, String> {
+    let _guard = state.writing.lock().unwrap_or_else(|e| e.into_inner());
+    let profile = state.profile(profile_id)?;
+    let devices = state.hid.devices.lock().unwrap().clone();
+    let mut results = Vec::new();
+    for (config, target) in profile.configs.iter().zip(resolve(&profile, &devices)) {
+        if only.is_some_and(|id| id != config.id) {
+            continue;
+        }
+        let outcome = target
+            .target
+            .and_then(|(key, device)| write_config(state, app, &profile, config, key, device));
+        results.push(match outcome {
+            Ok((hardware, software)) => WriteResult {
+                config: config.id.clone(),
+                hardware,
+                software,
+                error: None,
+            },
+            Err(e) => WriteResult {
+                config: config.id.clone(),
+                hardware: 0,
+                software: 0,
+                error: Some(e),
+            },
+        });
+    }
+    if only.is_none() {
+        let mut profiles = state.profiles.lock().unwrap();
+        profiles.active = Some(profile_id.to_string());
+        state.save_profiles(&profiles)?;
+        let snapshot = profiles.clone();
+        drop(profiles);
+        let _ = tray::sync(app, state.settings.lock().unwrap().tray, &snapshot);
+        let _ = app.emit("profiles-changed", &snapshot);
+    }
+    let _ = app.emit(
+        "applied",
+        (&profile.id, &results, applied(&state.live.lock().unwrap())),
+    );
+    Ok(results)
+}
+
+/// Writes every config of a profile to the attached devices it names.
 #[tauri::command]
-async fn upload(
+async fn apply_profile(
     app: AppHandle,
     state: State<'_, AppState>,
-    mapping: Mapping,
-    path: Option<String>,
-) -> Result<UploadDto, String> {
-    let driver = state.driver(&mapping)?;
-    if !errors_for(driver.as_ref(), &mapping)?.is_empty() {
-        return Err("Fix the slots marked in red first".into());
+    profile: String,
+) -> Result<Vec<WriteResult>, String> {
+    apply(&state, &app, &profile, None)
+}
+
+/// Writes one config (the one being edited) to its device.
+#[tauri::command]
+async fn upload_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    config: String,
+) -> Result<WriteResult, String> {
+    let results = apply(&state, &app, &profile, Some(&config))?;
+    let result = results
+        .into_iter()
+        .next()
+        .ok_or("that device config no longer exists")?;
+    match &result.error {
+        Some(e) => Err(e.clone()),
+        None => Ok(result),
     }
-    let prepared = prepare(driver.as_ref(), &mapping).map_err(err)?;
-    let (m, encoded) = (mapping.clone(), prepared.encoded.clone());
-    state.hid.call(move |api| {
-        let device = pick(driver.as_ref(), api, &m, path.as_deref())?;
-        driver.write(api, &device, &encoded)
-    })?;
-    state.store.save_uploaded(&mapping).map_err(err)?;
-    let software = prepared.triggers.len();
-    state.agent.set_triggers(&app, prepared.triggers);
-    Ok(UploadDto {
-        hardware: prepared.hardware,
-        software,
-    })
+}
+
+/// Called from the tray menu, off the UI thread.
+pub(crate) fn apply_from_tray(app: &AppHandle, profile: &str) {
+    let state = app.state::<AppState>();
+    match apply(&state, app, profile, None) {
+        Ok(results) => {
+            for r in results.iter().filter(|r| r.error.is_some()) {
+                log::warn!(
+                    "profile {profile}: config {}: {}",
+                    r.config,
+                    r.error.as_deref().unwrap_or("")
+                );
+            }
+        }
+        Err(e) => log::warn!("profile {profile}: {e}"),
+    }
 }
 
 /// Reads the keymap stored on the device, for drivers whose devices can report it.
@@ -263,28 +589,67 @@ async fn upload(
 async fn read_from_device(
     state: State<'_, AppState>,
     driver: String,
-    model: String,
-    path: Option<String>,
+    path: String,
 ) -> Result<Mapping, String> {
     let driver = state.registry.get(&driver).map_err(err)?;
-    state.hid.call(move |api| {
-        let probe = driver.starter(&model)?;
-        let device = pick(driver.as_ref(), api, &probe, path.as_deref())?;
-        driver.read_keymap(api, &device)
-    })
+    let device = state
+        .hid
+        .devices
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|d| d.path == path)
+        .cloned()
+        .ok_or("that device is no longer connected")?;
+    state.hid.call(move |api| driver.read_keymap(api, &device))
+}
+
+#[derive(Serialize)]
+struct AttachedDto {
+    #[serde(flatten)]
+    device: DetectedDevice,
+    /// How a config binds to this device.
+    bind: DeviceRef,
+    key: String,
 }
 
 #[derive(Serialize)]
 struct StatusDto {
-    devices: Vec<DetectedDevice>,
+    devices: Vec<AttachedDto>,
+    /// Where each config of each profile would go right now: profile id →
+    /// config id → device key, or the reason it has none.
+    targets: BTreeMap<String, BTreeMap<String, Result<String, String>>>,
     agent: AgentStatus,
     watching: bool,
 }
 
 #[tauri::command]
 fn status(state: State<'_, AppState>) -> StatusDto {
+    let devices = state.hid.devices.lock().unwrap().clone();
+    let targets = state
+        .profiles
+        .lock()
+        .unwrap()
+        .profiles
+        .iter()
+        .map(|p| {
+            let per_config = resolve(p, &devices)
+                .into_iter()
+                .map(|r| (r.config, r.target.map(|(key, _)| key)))
+                .collect();
+            (p.id.clone(), per_config)
+        })
+        .collect();
     StatusDto {
-        devices: state.hid.devices.lock().unwrap().clone(),
+        devices: identify(&devices)
+            .into_iter()
+            .map(|(bind, device)| AttachedDto {
+                key: bind.key(device.driver),
+                bind,
+                device,
+            })
+            .collect(),
+        targets,
         agent: state.agent.status(),
         watching: state
             .hid
@@ -300,11 +665,20 @@ fn set_agent(
     enabled: bool,
 ) -> Result<AgentStatus, String> {
     state.agent.set_enabled(&app, enabled);
-    state
-        .store
-        .save_settings(&store::Settings { agent: enabled })
-        .map_err(err)?;
+    let mut settings = state.settings.lock().unwrap();
+    settings.agent = enabled;
+    state.store.save_settings(&settings).map_err(err)?;
     Ok(state.agent.status())
+}
+
+/// Turns the system tray icon on or off.
+#[tauri::command]
+fn set_tray(app: AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let profiles = state.profiles.lock().unwrap().clone();
+    tray::sync(&app, enabled, &profiles)?;
+    let mut settings = state.settings.lock().unwrap();
+    settings.tray = enabled;
+    state.store.save_settings(&settings).map_err(err)
 }
 
 /// Runs an agent action after 1.5 s, so the user can click the window
@@ -404,10 +778,7 @@ async fn export_mapping(app: AppHandle, mapping: Mapping) -> Result<bool, String
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            tray::show_window(app);
         }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
@@ -428,10 +799,32 @@ pub fn run() {
     );
 
     builder
+        // With the tray on, closing the window keeps the app (and its agent
+        // and profile switching) running in the background.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.app_handle().state::<AppState>();
+                let tray = state.settings.lock().unwrap().tray;
+                if tray && window.app_handle().tray_by_id("main").is_some() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             let registry = registry();
             let store = Store::new(app.path().app_data_dir()?);
             let agent = Arc::new(Agent::default());
+
+            let starter = || {
+                registry
+                    .get(DEFAULT_DRIVER)
+                    .and_then(|d| d.starter(DEFAULT_MODEL))
+                    .expect("the default driver has a starter keymap")
+            };
+            let (profiles, warning) = store.profiles(starter);
+            let live = store.live();
+            let settings = store.settings();
 
             let handle = app.handle().clone();
             #[cfg(target_os = "linux")]
@@ -446,33 +839,48 @@ pub fn run() {
                 let _ = handle.emit("keypad-event", &event);
             });
 
-            // Agent slots from the last upload keep working after a restart.
-            let last = store.uploaded().and_then(|m| {
-                let driver = registry.get(&m.driver).ok()?;
-                prepare(driver.as_ref(), &m).ok()
-            });
-            if let Some(prepared) = last {
-                agent.set_triggers(app.handle(), prepared.triggers);
+            // Agent slots on every device keep working after a restart.
+            let triggers: Vec<Trigger> = live.values().flat_map(|l| l.triggers.clone()).collect();
+            agent.set_triggers(app.handle(), triggers);
+            agent.set_enabled(app.handle(), settings.agent);
+
+            if settings.tray {
+                if let Err(e) = tray::sync(app.handle(), true, &profiles) {
+                    log::warn!("{e}");
+                }
             }
-            agent.set_enabled(app.handle(), store.settings().agent);
 
             app.manage(AppState {
                 registry,
                 hid,
                 agent,
                 store,
+                profiles: Mutex::new(profiles),
+                live: Mutex::new(live),
+                settings: Mutex::new(settings),
+                writing: Mutex::new(()),
+                warning,
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            check_keymap,
             starter_mapping,
-            save_mapping,
+            save_config,
+            create_profile,
+            rename_profile,
+            delete_profile,
+            add_config,
+            update_config,
+            remove_config,
             preview,
-            upload,
+            apply_profile,
+            upload_config,
             read_from_device,
             status,
             set_agent,
+            set_tray,
             test_action,
             list_apps,
             import_mapping,

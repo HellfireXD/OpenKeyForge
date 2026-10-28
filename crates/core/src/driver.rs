@@ -10,7 +10,7 @@
 //! Drivers receive hardware-only keymaps: [`prepare`] lowers software
 //! actions to trigger chords first (see [`crate::agent`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
@@ -70,6 +70,8 @@ pub struct DetectedDevice {
     pub vendor_id: u16,
     pub product_id: u16,
     pub name: String,
+    /// USB serial number, when the device reports one (CH57x pads don't).
+    pub serial: Option<String>,
     /// Models this device may be. More than one means the user must pick.
     pub models: Vec<&'static str>,
 }
@@ -238,12 +240,22 @@ pub struct Prepared {
 
 /// Checks a keymap, lowers its software actions, and encodes it.
 pub fn prepare(driver: &dyn DeviceDriver, m: &Mapping) -> Result<Prepared> {
+    prepare_avoiding(driver, m, &HashSet::new())
+}
+
+/// [`prepare`], with agent chords chosen outside `taken` (the chords live on
+/// other attached devices).
+pub fn prepare_avoiding(
+    driver: &dyn DeviceDriver,
+    m: &Mapping,
+    taken: &HashSet<(u8, u8)>,
+) -> Result<Prepared> {
     if let Some((slot, e)) = slot_errors(driver, m)?.into_iter().next() {
         let (layer, name) = slot.split_once(':').unwrap_or(("0", &slot));
         let layer: usize = layer.parse().unwrap_or(0);
         bail!("layer {} {name}: {e}", layer + 1);
     }
-    let (lowered, triggers) = agent::lower(m)?;
+    let (lowered, triggers) = agent::lower_avoiding(m, taken)?;
     let used: usize = m.layers.iter().map(|l| l.slots.len()).sum();
     Ok(Prepared {
         encoded: driver.encode(&lowered)?,

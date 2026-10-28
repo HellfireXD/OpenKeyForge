@@ -8,12 +8,15 @@
 //! - [`driver`]: the [`driver::DeviceDriver`] trait each device family
 //!   implements, the capabilities it reports, and the [`driver::Registry`].
 //! - [`input`]: decodes what a device sends, for the live key test.
+//! - [`profile`]: named sets of device configs, and which attached device
+//!   each config goes to.
 
 pub mod agent;
 pub mod driver;
 pub mod input;
 pub mod keys;
 pub mod model;
+pub mod profile;
 
 pub use driver::{Capabilities, DeviceDriver, Registry};
 pub use hidapi;

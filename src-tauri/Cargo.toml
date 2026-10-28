@@ -22,7 +22,8 @@ tauri-build = { version = "2", features = [] }
 # The driver layer: the keymap model and trait, and one crate per device family.
 okf_core = { package = "openkeyforge-core", path = "../crates/core" }
 okf_driver_ch57x = { package = "openkeyforge-driver-ch57x", path = "../crates/drivers/ch57x" }
-tauri = { version = "2", features = [] }
+# tray-icon: the optional system tray for switching profiles.
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"

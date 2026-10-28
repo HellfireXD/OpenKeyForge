@@ -1,11 +1,14 @@
-//! The draft, the last uploaded mapping and settings, as JSON files in the
-//! app's data directory. Writes go through a temp file and a rename so a
-//! crash never leaves half a file behind.
+//! Profiles, what each device currently holds, and settings, as JSON files
+//! in the app's data directory. Writes go through a temp file and a rename
+//! so a crash never leaves half a file behind.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use okf_core::agent::Trigger;
+use okf_core::profile::{DeviceConfig, Profile, Profiles};
 use okf_core::Mapping;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -13,7 +16,23 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 pub struct Settings {
     #[serde(default)]
     pub agent: bool,
+    /// Keep running in the system tray when the window is closed.
+    #[serde(default)]
+    pub tray: bool,
 }
+
+/// What was last written to one physical device, keyed by
+/// [`okf_core::profile::DeviceRef::key`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Live {
+    pub keymap: Mapping,
+    /// The agent chords this device sends.
+    pub triggers: Vec<Trigger>,
+    pub profile: String,
+    pub config: String,
+}
+
+pub type LiveMap = BTreeMap<String, Live>;
 
 pub struct Store {
     dir: PathBuf,
@@ -45,41 +64,47 @@ impl Store {
         write_atomic(&path, &(serde_json::to_string_pretty(value)? + "\n"))
     }
 
-    /// The draft, or `starter` and a warning when it can't be read or `check`
-    /// (the driver's layout check) rejects it.
-    pub fn draft(
-        &self,
-        starter: impl Fn() -> Mapping,
-        check: impl Fn(&Mapping) -> Result<()>,
-    ) -> (Mapping, Option<String>) {
-        match self.read::<Mapping>("mapping.json") {
-            Ok(Some(m)) => match check(&m) {
-                Ok(()) => (m, None),
-                Err(e) => (
-                    starter(),
-                    Some(format!(
-                        "Saved draft is invalid ({e:#}); showing the starter mapping"
-                    )),
-                ),
-            },
-            Ok(None) => (starter(), None),
+    /// The saved profiles, or one "Default" profile holding the draft from
+    /// before profiles existed (mapping.json) or `starter`. A file that can't
+    /// be read is reported and replaced in memory, never overwritten until
+    /// the next save.
+    pub fn profiles(&self, starter: impl Fn() -> Mapping) -> (Profiles, Option<String>) {
+        let default = |keymap: Mapping| Profiles {
+            active: Some("default".into()),
+            profiles: vec![Profile {
+                id: "default".into(),
+                name: "Default".into(),
+                configs: vec![DeviceConfig {
+                    id: "c1".into(),
+                    name: None,
+                    bind: None,
+                    keymap,
+                }],
+            }],
+        };
+        match self.read::<Profiles>("profiles.json") {
+            Ok(Some(p)) if !p.profiles.is_empty() => (p, None),
+            Ok(_) => {
+                let legacy = self.read::<Mapping>("mapping.json").ok().flatten();
+                (default(legacy.unwrap_or_else(&starter)), None)
+            }
             Err(e) => (
-                starter(),
-                Some(format!("{e:#}; showing the starter mapping")),
+                default(starter()),
+                Some(format!("{e:#}; starting with a default profile")),
             ),
         }
     }
 
-    pub fn save_draft(&self, m: &Mapping) -> Result<()> {
-        self.write("mapping.json", m)
+    pub fn save_profiles(&self, p: &Profiles) -> Result<()> {
+        self.write("profiles.json", p)
     }
 
-    pub fn uploaded(&self) -> Option<Mapping> {
-        self.read("uploaded.json").ok().flatten()
+    pub fn live(&self) -> LiveMap {
+        self.read("live.json").ok().flatten().unwrap_or_default()
     }
 
-    pub fn save_uploaded(&self, m: &Mapping) -> Result<()> {
-        self.write("uploaded.json", m)
+    pub fn save_live(&self, live: &LiveMap) -> Result<()> {
+        self.write("live.json", live)
     }
 
     pub fn settings(&self) -> Settings {
